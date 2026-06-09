@@ -62,9 +62,9 @@
 
 ## 作者
 
-**Design:** 军哥  
+**Design:** 榛名雪  
 **Implementation:** 小雪 (Hermes Agent)  
-**Name:** 军哥 🐙
+**Name:** 榛名雪 🐙
 
 ## License
 
