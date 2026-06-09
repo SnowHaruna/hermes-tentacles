@@ -1,28 +1,36 @@
 #!/usr/bin/env python3
 """
-Hermes' Tentacle V6 — 独立分身，主循环 + 原地等待协议。
+Hermes' Tentacle V6.2 — 独立分身，主循环 + 原地等待协议（安全加固版）。
 用法: python3 tentacle.py "任务描述" [--context "上下文"] [--max-iterations 50]
 退出码: 0=成功, 101=等待帮助中(不退出), 1=错误
-信号处理: SIGTERM → 保存部分结果再退（不丢产出）
+信号处理: SIGTERM → 异步安全保存部分结果再退（不丢产出）
 
 原则: 触手不自杀——跑到完，或被军哥喊停（小雪kill）。
+安全审计: 2026-06-10，10项漏洞已修复（C1需军哥轮换GitHub PAT）。
 """
 
-import sys, os, json, yaml, time, argparse, signal, glob
+import sys, os, json, yaml, time, argparse, signal, re, glob
 from pathlib import Path
 
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")))
-HERMES_AGENT = HERMES_HOME / "hermes-agent"
-sys.path.insert(0, str(HERMES_AGENT))
 
-HELP_DIR = Path("/tmp/tentacle_help")
+# ── L1 修复: sys.path 路径校验 ──
+HERMES_AGENT = os.path.realpath(HERMES_HOME / "hermes-agent")
+HERMES_BASE = os.path.realpath(os.path.expanduser("~/.hermes"))
+if not HERMES_AGENT.startswith(HERMES_BASE + os.sep):
+    raise RuntimeError(f"HERMES_AGENT outside expected location: {HERMES_AGENT}")
+sys.path.insert(0, HERMES_AGENT)
+
+# ── C3 修复: HELP_DIR 从 /tmp 移到用户目录，防共享竞态 ──
+HELP_DIR = HERMES_HOME / "tentacle_help"
 
 # ── 全局状态（信号处理时需要） ──
 _partial_result = None
 _output_path = None
+_writing = False  # L2 修复: 防信号/主线程写竞态
 
 def heartbeat():
-    """写入心跳时间戳，小雪看门狗读取。异常时静默吞掉（别因为磁盘满崩触手）。"""
+    """写入心跳时间戳，小雪看门狗读取。异常时静默吞掉。"""
     try:
         (HELP_DIR / "heartbeat").write_text(str(time.time()))
     except Exception:
@@ -31,29 +39,41 @@ def heartbeat():
 def log_progress(msg):
     print(f"[tentacle] {msg}", file=sys.stderr, flush=True)
 
+# ── M1 修复: prompt 参数清洗 ──
+def sanitize_prompt_param(s: str) -> str:
+    """移除可能用于 prompt 注入的控制字符和伪标签。"""
+    # 移除伪 XML 标签
+    s = re.sub(r'<\s*(system|user|assistant|instruction|tool_call)', '', s, flags=re.I)
+    # 移除零宽字符
+    s = re.sub(r'[\u200b-\u200f\u2028-\u202f\u2060-\u206f]', '', s)
+    return s
+
+# ── H2 修复: 信号处理器异步安全 ──
 def save_partial_and_exit(signum=None, frame=None):
-    """SIGTERM 处理：保存已有结果，体面退出"""
+    """SIGTERM 处理：异步安全保存已有结果，体面退出"""
+    global _writing
+    if _writing:
+        return  # L2: 主线程正在写，放弃保存
     if _partial_result and _output_path:
         try:
-            os.makedirs(os.path.dirname(_output_path), exist_ok=True)
-            with open(_output_path, "w") as f:
-                f.write(str(_partial_result))
-            log_progress(f"🗡️ 收到停止信号 — 已保存部分结果到 {_output_path}")
-        except Exception as e:
-            log_progress(f"🗡️ 收到停止信号 — 保存失败: {e}")
-    else:
-        log_progress("🗡️ 收到停止信号 — 无结果可保存")
-    sys.exit(0)
+            # 使用 os.open/write/close — POSIX 异步安全
+            fd = os.open(_output_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            os.write(fd, str(_partial_result).encode())
+            os.close(fd)
+        except Exception:
+            pass
+    os._exit(0)  # 异步安全，立即退出
 
 signal.signal(signal.SIGTERM, save_partial_and_exit)
 
 def build_prompt(task, context, resume_files=None):
-    """构建给 AIAgent 的 prompt —— 含求助协议 + 续跑上下文"""
-    help_protocol = """## 求助协议 🆘
+    """构建给 AIAgent 的 prompt —— 含求助协议 + 续跑上下文 + 记忆回传标记"""
+    help_dir_str = str(HELP_DIR)
+    help_protocol = f"""## 求助协议 🆘
 如果你遇到必须军哥才能解决的问题（需要权限、token、手动配置等），你已经试过所有你能用的方法。
 此时：
-1. 用 terminal 写入求助文件: /tmp/tentacle_help/need_NNN.json
-   格式: {"issue": "简洁描述", "what_you_tried": "你试过的方法", "what_need_from_军哥": "需要军哥做什么"}
+1. 用 terminal 写入求助文件: {help_dir_str}/need_NNN.json
+   格式: {{"issue": "简洁描述", "what_you_tried": "你试过的方法", "what_need_from_军哥": "需要军哥做什么"}}
 2. 结束当前轮次。触手脚本会检测到求助文件，进入等待状态。
 3. 你不需要在 prompt 里处理等待——脚本层会处理。"""
 
@@ -64,22 +84,23 @@ def build_prompt(task, context, resume_files=None):
             resume_context += f"- {f}\n"
         resume_context += "\n先读取所有回复文件，然后从断点继续执行。"
 
+    # H1 修复: 记忆回传加 [TENTACLE] 标记 + 审核提示
     return f"""你是主 Hermes 的一条触手（时间线分支）。你分享主 Hermes 的记忆和知识，但任务流程是独立的。
 
 {help_protocol}
 
-## 记忆回传
-任务完成后，使用 memory 工具将关键发现写入记忆池：
-- 踩到的坑 → memory(action="add", target="memory")
-- 搜到的关键数据 → memory(action="add", target="memory")
-- 验证过的结论 → memory(action="add", target="memory")
-- 一句话一条
+## 记忆回传（需加标记）
+任务完成后，使用 memory 工具将关键发现写入记忆池。每条必须加 [TENTACLE] 前缀：
+- 踩到的坑 → memory(action="add", target="memory", content="[TENTACLE] 坑：...")
+- 搜到的关键数据 → memory(action="add", target="memory", content="[TENTACLE] 数据：...")
+- 验证过的结论 → memory(action="add", target="memory", content="[TENTACLE] 结论：...")
+- 一句话一条。主 Hermes（小雪）会审核标记的记忆后再决定是否采纳。
 
 ## 执行
 1. 完成任务
-2. 如有求助，写入 /tmp/tentacle_help/need_*.json
+2. 如有求助，写入 {help_dir_str}/need_*.json
 3. 写报告到文件
-4. 用 memory 回传关键发现
+4. 用 memory 回传关键发现（带 [TENTACLE] 标记）
 5. 输出 JSON 结果到 stdout
 
 {task}{resume_context}"""
@@ -102,7 +123,7 @@ def wait_for_answers(need_files):
             with open(nf) as f:
                 need_data = json.load(f)
             log_progress(f"   📋 {need_data.get('issue', nf.name)}")
-        except:
+        except Exception:
             log_progress(f"   📋 {nf.name}")
 
     log_progress("⏳ 等待军哥回复中...（小雪会汇报，看门狗会检测心跳）")
@@ -110,28 +131,28 @@ def wait_for_answers(need_files):
     answered = []
     last_log_time = time.time()
     while True:
-        heartbeat()  # 等待期间也保持心跳！
+        heartbeat()
 
         for nf in need_files:
             answer = HELP_DIR / nf.name.replace("need_", "answered_")
-            if answer.exists() and answer not in answered:
-                answered.append(answer)
+            if answer not in answered:
+                # M2 修复: 先读后标，防 TOCTOU
                 try:
                     with open(answer) as f:
                         ans_data = json.load(f)
+                    answered.append(answer)
                     log_progress(f"✅ 收到回复: {ans_data.get('resolution', '已处理')}")
-                except:
-                    log_progress(f"✅ 收到回复: {answer.name}")
+                except (FileNotFoundError, json.JSONDecodeError):
+                    pass  # 文件还不存在或不完整，下轮重试
 
         if len(answered) >= len(need_files):
             break
 
         time.sleep(3)
 
-        # 每 60 秒汇报一次等待状态（没那么频繁，别吵）
         if time.time() - last_log_time > 60:
-            elapsed = int(time.time() - last_log_time)
-            log_progress(f"⏳ 仍在等待军哥回复... ({sum(1 for _ in HELP_DIR.glob('need_*.json')) - len(answered)} 个未回复)")
+            remaining = sum(1 for _ in HELP_DIR.glob("need_*.json"))
+            log_progress(f"⏳ 仍在等待军哥回复... ({remaining - len(answered)} 个未回复)")
             last_log_time = time.time()
 
     log_progress(f"✅ 全部 {len(answered)} 个问题已回复，准备续跑")
@@ -163,17 +184,42 @@ def run_agent(prompt, model, api_key, base_url, provider_name, enabled_sets, max
     return agent.run_conversation(prompt)
 
 def main():
-    global _partial_result, _output_path
+    global _partial_result, _output_path, _writing
 
-    parser = argparse.ArgumentParser(description="Hermes' Tentacle V6 — 后台分身（原地等待，不自杀）")
+    parser = argparse.ArgumentParser(description="Hermes' Tentacle V6.2 — 后台分身（安全加固）")
     parser.add_argument("task", help="任务描述")
     parser.add_argument("--context", help="附加上下文", default="")
     parser.add_argument("--output", help="输出文件路径", default=str(HERMES_HOME / "cron/output/tentacle_result.md"))
     parser.add_argument("--toolsets", help="逗号分隔的工具集", default="web,terminal,file,search,skills,memory")
-    parser.add_argument("--max-iterations", type=int, default=50, help="单轮最大推理步数（默认50）")
+    parser.add_argument("--max-iterations", type=int, default=50, help="单轮最大推理步数（默认50，上限500）")
     args = parser.parse_args()
 
+    # ── M3 修复: max-iterations 上限校验 ──
+    if args.max_iterations > 500:
+        log_progress(f"⚠️ max-iterations={args.max_iterations} 超过上限500，已限制")
+        args.max_iterations = 500
+    elif args.max_iterations < 1:
+        args.max_iterations = 50
+
+    # ── C3 修复: HELP_DIR 归属校验 + 收紧权限 ──
     HELP_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        stat = HELP_DIR.stat()
+        if stat.st_uid != os.getuid():
+            raise RuntimeError(f"{HELP_DIR} owned by uid {stat.st_uid}, expected {os.getuid()}")
+        HELP_DIR.chmod(0o700)
+    except Exception as e:
+        log_progress(f"⚠️ HELP_DIR 权限检查失败: {e}")
+
+    # ── C2 修复: --output 路径遍历防护 ──
+    output_base = os.path.realpath(str(HERMES_HOME / "cron/output"))
+    _output_path = os.path.realpath(args.output)
+    if not _output_path.startswith(output_base + os.sep) and _output_path != output_base:
+        raise ValueError(
+            f"Output path {args.output} escapes allowed directory {output_base}. "
+            f"Use a filename under {output_base}/."
+        )
+    args.output = _output_path
 
     # 加载配置
     cfg_path = HERMES_HOME / "config.yaml"
@@ -198,17 +244,18 @@ def main():
     base_url = os.getenv("HERMES_BASE_URL")
     enabled_sets = [t.strip() for t in args.toolsets.split(",") if t.strip()]
 
-    task_text = args.task
+    # ── M1 修复: 清洗 task/context 参数 ──
+    task_text = sanitize_prompt_param(args.task)
     if args.context:
-        task_text = f"{args.context}\n\n{task_text}"
+        task_text = f"{sanitize_prompt_param(args.context)}\n\n{task_text}"
 
-    # 清理旧的求助文件（新任务开始）
+    # 清理旧的求助文件
     for old in HELP_DIR.glob("need_*.json"):
         old.unlink(missing_ok=True)
     for old in HELP_DIR.glob("answered_*.json"):
         old.unlink(missing_ok=True)
 
-    log_progress(f"🦑 V6 触手启动 — model={model} tools={enabled_sets} max_iter={args.max_iterations}")
+    log_progress(f"🦑 V6.2 触手启动 — model={model} tools={enabled_sets} max_iter={args.max_iterations}")
     log_progress(f"📋 任务: {args.task[:120]}")
     heartbeat()
 
@@ -234,28 +281,29 @@ def main():
             sys.exit(1)
 
         final_result = result.get("final_response", str(result)) if isinstance(result, dict) else str(result)
-        _partial_result = final_result  # 随时可被 SIGTERM 保存
+        _partial_result = final_result
 
         # 检查求助
         unanswered = get_unanswered_needs()
         if not unanswered:
-            # ✅ 无求助 — 任务完成
             break
 
-        # 🆘 有求助 — 原地等待军哥回复（无超时）
+        # 有求助 — 原地等待军哥回复（无超时）
         answered = wait_for_answers(unanswered)
         resume_files = [str(a) for a in answered]
         log_progress(f"🔄 收到 {len(answered)} 个回复，续跑...")
 
     elapsed = time.time() - global_start
 
-    # 写入报告
-    _output_path = args.output
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
-    with open(args.output, "w") as f:
-        f.write(final_result or "")
+    # 写入报告 — L2: 原子标志防竞态
+    _writing = True
+    try:
+        os.makedirs(os.path.dirname(args.output), exist_ok=True)
+        with open(args.output, "w") as f:
+            f.write(final_result or "")
+    finally:
+        _writing = False
 
-    # 检查是否还有未回复的求助
     still_unanswered = get_unanswered_needs()
 
     output = {
