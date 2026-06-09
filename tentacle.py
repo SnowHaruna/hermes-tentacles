@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 Hermes' Tentacle V6 — 独立分身，主循环 + 等待协议。
-用法: python3 tentacle.py "任务描述" [--context "上下文"] [--resume]
-退出码: 0=成功, 101=等待中(不退出), 102=超时/被掐, 1=错误
+用法: python3 tentacle.py "任务描述" [--context "上下文"]
+退出码: 0=成功, 101=等待帮助(不退出), 1=错误, 其他=被小雪kill(信号)
 
 V6 核心改动: 101 不再退出，触手原地轮询等待 answered_*.json，
 收到军哥回复后继续工作——真正的"暂停续跑"。
+无自爆机制——触手跑到完或被小雪kill，不会自己超时炸。
 """
 
 import sys, os, json, yaml, time, argparse, glob
@@ -16,6 +17,10 @@ HERMES_AGENT = HERMES_HOME / "hermes-agent"
 sys.path.insert(0, str(HERMES_AGENT))
 
 HELP_DIR = Path("/tmp/tentacle_help")
+
+def heartbeat():
+    """写入心跳时间戳，供小雪看门狗读取"""
+    (HELP_DIR / "heartbeat").write_text(str(time.time()))
 
 def log_progress(msg):
     print(f"[tentacle] {msg}", file=sys.stderr, flush=True)
@@ -111,9 +116,11 @@ def run_agent(prompt, model, api_key, base_url, provider_name, enabled_sets):
         step_count[0] += 1
         arg_preview = str(args)[:80] if args else ""
         log_progress(f"🔧 {name}({arg_preview}...)")
+        heartbeat()
     def on_tool_done(tc_id, name, args, result):
         r = str(result)[:100].replace('\n', ' ')
         log_progress(f"✅ {name} → {r}")
+        heartbeat()
 
     from run_agent import AIAgent
     agent = AIAgent(
@@ -133,8 +140,6 @@ def main():
     parser.add_argument("--context", help="附加上下文", default="")
     parser.add_argument("--output", help="输出文件路径", default=str(HERMES_HOME / "cron/output/tentacle_result.md"))
     parser.add_argument("--toolsets", help="逗号分隔的工具集", default="web,terminal,file,search,skills,memory")
-    parser.add_argument("--timeout", type=int, default=600, help="最大运行秒数，超时自爆")
-    parser.add_argument("--resume", help="从求助恢复（用于外部重启，一般不需要）", default="")
     args = parser.parse_args()
 
     HELP_DIR.mkdir(parents=True, exist_ok=True)
@@ -174,21 +179,15 @@ def main():
 
     log_progress(f"🦑 V6 触手启动 — model={model} tools={enabled_sets}")
     log_progress(f"📋 任务: {args.task[:120]}")
+    heartbeat()
 
     global_start = time.time()
     final_result = None
     run_count = 0
     resume_files = []
 
-    # ── 主循环：支持多次续跑 ──
+    # ── 主循环：支持多次续跑（无自爆，跑到完或被kill）──
     while True:
-        if global_start and time.time() - global_start > args.timeout:
-            log_progress(f"⏰ 全局超时 ({args.timeout}s) — exit 102")
-            print(json.dumps({"status": "killed", "task": args.task, "reason": "timeout",
-                              "time_seconds": round(time.time() - global_start, 1)},
-                             ensure_ascii=False, indent=2))
-            sys.exit(102)
-
         run_count += 1
         log_progress(f"▶️  第 {run_count} 轮推理" + (" (续跑)" if resume_files else ""))
 
