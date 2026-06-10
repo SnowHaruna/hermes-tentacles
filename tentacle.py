@@ -114,13 +114,6 @@ def build_prompt(task, context, resume_files=None, inject_memory=None):
 5. **禁止再分身**：你是触手本身，不再判断任务轻重，不再开子触手。
 6. 输出 JSON 结果到 stdout
 
-## 执行
-1. 完成任务
-2. 如有求助，写入 {help_dir_str}/need_*.json
-3. 写报告到文件
-4. 用 memory 回传关键发现（带 [TENTACLE] 标记）
-5. 输出 JSON 结果到 stdout
-
 {task}{resume_context}"""
 
 def get_unanswered_needs():
@@ -204,14 +197,27 @@ def run_agent(prompt, model, api_key, base_url, provider_name, enabled_sets, max
 def main():
     global _partial_result, _output_path, _writing
 
-    parser = argparse.ArgumentParser(description="Hermes' Tentacle V6.2 — 后台分身（安全加固）")
-    parser.add_argument("task", help="任务描述")
+    parser = argparse.ArgumentParser(description="Hermes' Tentacle V6.3 — 后台分身（便捷增强）")
+    parser.add_argument("task", nargs="?", help="任务描述（可从 --prompt-file 读取）")
     parser.add_argument("--context", help="附加上下文", default="")
     parser.add_argument("--output", help="输出文件路径", default=str(HERMES_HOME / "cron/output/tentacle_result.md"))
     parser.add_argument("--toolsets", help="逗号分隔的工具集", default="web,terminal,file,search,skills,memory")
     parser.add_argument("--max-iterations", type=int, default=50, help="单轮最大推理步数（默认50，上限500）")
     parser.add_argument("--inject-memory", help="注入的记忆文本文件路径(跳过tentacle自身RAG检索)", default=None)
+    parser.add_argument("--name", help="触手运行名称（用于日志标识）", default=None)
+    parser.add_argument("--prompt-file", help="从文件读取任务（优先级高于命令行task）", default=None)
+    parser.add_argument("--findings-dir", help="触手发现暂存目录", default=str(HERMES_HOME / "tentacle_findings"))
     args = parser.parse_args()
+
+    # Resolve task from --prompt-file if provided
+    if args.prompt_file:
+        try:
+            args.task = Path(args.prompt_file).read_text(encoding="utf-8").strip()
+            log_progress(f"📄 从文件读取任务: {args.prompt_file}")
+        except Exception as e:
+            raise RuntimeError(f"无法读取 prompt-file {args.prompt_file}: {e}")
+    if not args.task:
+        raise RuntimeError("必须提供 task 参数或 --prompt-file")
 
     # ── M3 修复: max-iterations 上限校验 ──
     if args.max_iterations > 500:
@@ -230,13 +236,24 @@ def main():
     except Exception as e:
         log_progress(f"⚠️ HELP_DIR 权限检查失败: {e}")
 
-    # ── C2 修复: --output 路径遍历防护 ──
+    # ── C2 修复: --output 路径遍历防护（放宽到多个合法目录）──
+    ALLOWED_OUTPUT_DIRS = [
+        str(HERMES_HOME / "cron/output"),
+        str(HERMES_HOME / "reports"),
+        str(HERMES_HOME / "tentacle_output"),
+    ]
+    for d in ALLOWED_OUTPUT_DIRS:
+        Path(d).mkdir(parents=True, exist_ok=True)
     output_base = os.path.realpath(str(HERMES_HOME / "cron/output"))
     _output_path = os.path.realpath(args.output)
-    if not _output_path.startswith(output_base + os.sep) and _output_path != output_base:
+    allowed = any(
+        _output_path.startswith(os.path.realpath(d) + os.sep) or _output_path == os.path.realpath(d)
+        for d in ALLOWED_OUTPUT_DIRS
+    )
+    if not allowed:
         raise ValueError(
-            f"Output path {args.output} escapes allowed directory {output_base}. "
-            f"Use a filename under {output_base}/."
+            f"Output path {args.output} not in any allowed directory. "
+            f"Allowed: {', '.join(ALLOWED_OUTPUT_DIRS)}"
         )
     args.output = _output_path
 
@@ -247,11 +264,23 @@ def main():
         with open(cfg_path) as f:
             cfg = yaml.safe_load(f) or {}
 
-    from dotenv import load_dotenv
     try:
-        load_dotenv(str(HERMES_HOME / ".env"), override=True, encoding="utf-8")
-    except UnicodeDecodeError:
-        load_dotenv(str(HERMES_HOME / ".env"), override=True, encoding="latin-1")
+        from dotenv import load_dotenv
+        try:
+            load_dotenv(str(HERMES_HOME / ".env"), override=True, encoding="utf-8")
+        except UnicodeDecodeError:
+            load_dotenv(str(HERMES_HOME / ".env"), override=True, encoding="latin-1")
+    except ImportError:
+        # Fallback: manual .env parser (no dotenv dependency)
+        env_path = HERMES_HOME / ".env"
+        if env_path.exists():
+            for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, _, val = line.partition("=")
+                    key, val = key.strip(), val.strip().strip('"').strip("'")
+                    if key and key not in os.environ:
+                        os.environ[key] = val
 
     model_cfg = cfg.get("model", {})
     model = model_cfg.get("default", os.getenv("HERMES_MODEL", ""))
