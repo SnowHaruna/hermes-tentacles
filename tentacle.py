@@ -66,8 +66,8 @@ def save_partial_and_exit(signum=None, frame=None):
 
 signal.signal(signal.SIGTERM, save_partial_and_exit)
 
-def build_prompt(task, context, resume_files=None):
-    """构建给 AIAgent 的 prompt —— 含求助协议 + 续跑上下文 + 记忆回传标记"""
+def build_prompt(task, context, resume_files=None, inject_memory=None):
+    """构建给 AIAgent 的 prompt —— 含求助协议 + 续跑上下文 + 记忆回传标记 + 注入记忆"""
     help_dir_str = str(HELP_DIR)
     help_protocol = f"""## 求助协议 🆘
 如果你遇到必须军哥才能解决的问题（需要权限、token、手动配置等），你已经试过所有你能用的方法。
@@ -85,16 +85,34 @@ def build_prompt(task, context, resume_files=None):
         resume_context += "\n先读取所有回复文件，然后从断点继续执行。"
 
     # H1 修复: 记忆回传加 [TENTACLE] 标记 + 审核提示
-    return f"""你是主 Hermes 的一条触手（时间线分支）。你分享主 Hermes 的记忆和知识，但任务流程是独立的。
+    memory_injection = ""
+    if inject_memory:
+        memory_injection = f"""## 记忆注入（来自主 Hermes 小雪）
+以下记忆是小雪在开触手前的 RAG 向量检索结果。你与小雪共享同样的记忆起点。
+
+{inject_memory}
+
+---
+"""
+    return f"""{memory_injection}你是主 Hermes 的一条触手（时间线分支）。你分享主 Hermes 的记忆和知识，但任务流程是独立的。
 
 {help_protocol}
 
-## 记忆回传（需加标记）
-任务完成后，使用 memory 工具将关键发现写入记忆池。每条必须加 [TENTACLE] 前缀：
-- 踩到的坑 → memory(action="add", target="memory", content="[TENTACLE] 坑：...")
-- 搜到的关键数据 → memory(action="add", target="memory", content="[TENTACLE] 数据：...")
-- 验证过的结论 → memory(action="add", target="memory", content="[TENTACLE] 结论：...")
-- 一句话一条。主 Hermes（小雪）会审核标记的记忆后再决定是否采纳。
+## 记忆回传（写文件，不进 memory 工具）
+将关键发现写入文件（不要用 memory 工具）。小雪会在后台自动审核：
+- 踩到的坑 → 写文件: {help_dir_str}/../tentacle_findings/finding_NNN.txt
+- 搜到的关键数据 → 同上
+- 验证过的结论 → 同上
+- 格式: [TENTACLE] 一句话发现。每条写一个文件。
+- 小雪会自动审核并转正有价值的发现。
+
+## 执行规则
+1. 完成任务
+2. 如有求助，写入 {help_dir_str}/need_*.json
+3. 写报告到输出文件
+4. 将关键发现写入 tentacle_findings/ 目录（每条一个 .txt）
+5. **禁止再分身**：你是触手本身，不再判断任务轻重，不再开子触手。
+6. 输出 JSON 结果到 stdout
 
 ## 执行
 1. 完成任务
@@ -158,7 +176,7 @@ def wait_for_answers(need_files):
     log_progress(f"✅ 全部 {len(answered)} 个问题已回复，准备续跑")
     return answered
 
-def run_agent(prompt, model, api_key, base_url, provider_name, enabled_sets, max_iterations):
+def run_agent(prompt, model, api_key, base_url, provider_name, enabled_sets, max_iterations, skip_memory=False):
     """运行一次 AIAgent，返回结果"""
     step_count = [0]
     def on_tool_start(tc_id, name, args):
@@ -176,7 +194,7 @@ def run_agent(prompt, model, api_key, base_url, provider_name, enabled_sets, max
         model=model, api_key=api_key, base_url=base_url,
         provider=provider_name, max_iterations=max_iterations,
         enabled_toolsets=enabled_sets, quiet_mode=False,
-        skip_context_files=True, skip_memory=False,
+        skip_context_files=True, skip_memory=skip_memory,
         load_soul_identity=True,
         tool_start_callback=on_tool_start,
         tool_complete_callback=on_tool_done,
@@ -192,6 +210,7 @@ def main():
     parser.add_argument("--output", help="输出文件路径", default=str(HERMES_HOME / "cron/output/tentacle_result.md"))
     parser.add_argument("--toolsets", help="逗号分隔的工具集", default="web,terminal,file,search,skills,memory")
     parser.add_argument("--max-iterations", type=int, default=50, help="单轮最大推理步数（默认50，上限500）")
+    parser.add_argument("--inject-memory", help="注入的记忆文本文件路径(跳过tentacle自身RAG检索)", default=None)
     args = parser.parse_args()
 
     # ── M3 修复: max-iterations 上限校验 ──
@@ -249,6 +268,17 @@ def main():
     if args.context:
         task_text = f"{sanitize_prompt_param(args.context)}\n\n{task_text}"
 
+    # ── 注入记忆（来自小雪的 RAG 快照，跳过分身自身检索）──
+    inject_memory_text = None
+    skip_memory_flag = False
+    if args.inject_memory:
+        try:
+            inject_memory_text = Path(args.inject_memory).read_text(encoding="utf-8")
+            skip_memory_flag = True
+            log_progress(f"📋 已注入小雪的 RAG 记忆快照 ({len(inject_memory_text)} chars)")
+        except Exception as e:
+            log_progress(f"⚠️ 读取注入记忆失败: {e}")
+
     # 清理旧的求助文件
     for old in HELP_DIR.glob("need_*.json"):
         old.unlink(missing_ok=True)
@@ -269,11 +299,11 @@ def main():
         run_count += 1
         log_progress(f"▶️  第 {run_count} 轮推理" + (" (续跑)" if resume_files else ""))
 
-        prompt = build_prompt(task_text, args.context, resume_files if resume_files else None)
+        prompt = build_prompt(task_text, args.context, resume_files if resume_files else None, inject_memory_text)
 
         try:
             result = run_agent(prompt, model, api_key, base_url, provider_name,
-                              enabled_sets, args.max_iterations)
+                              enabled_sets, args.max_iterations, skip_memory=skip_memory_flag)
         except Exception as e:
             elapsed = time.time() - global_start
             print(json.dumps({"status": "error", "task": args.task, "error": str(e),
