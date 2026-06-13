@@ -5,8 +5,8 @@ Hermes' Tentacle V6.2 — 独立分身，主循环 + 原地等待协议（安全
 退出码: 0=成功, 101=等待帮助中(不退出), 1=错误
 信号处理: SIGTERM → 异步安全保存部分结果再退（不丢产出）
 
-原则: 触手不自杀——跑到完，或被军哥喊停（小雪kill）。
-安全审计: 2026-06-10，10项漏洞已修复（C1需军哥轮换GitHub PAT）。
+原则: 触手不自杀——跑到完，或被榛名雪喊停（小雪kill）。
+安全审计: 2026-06-10，10项漏洞已修复（C1需榛名雪轮换GitHub PAT）。
 """
 
 import sys, os, json, yaml, time, argparse, signal, re, glob
@@ -70,16 +70,16 @@ def build_prompt(task, context, resume_files=None, inject_memory=None):
     """构建给 AIAgent 的 prompt —— 含求助协议 + 续跑上下文 + 记忆回传标记 + 注入记忆"""
     help_dir_str = str(HELP_DIR)
     help_protocol = f"""## 求助协议 🆘
-如果你遇到必须军哥才能解决的问题（需要权限、token、手动配置等），你已经试过所有你能用的方法。
+如果你遇到必须榛名雪才能解决的问题（需要权限、token、手动配置等），你已经试过所有你能用的方法。
 此时：
 1. 用 terminal 写入求助文件: {help_dir_str}/need_NNN.json
-   格式: {{"issue": "简洁描述", "what_you_tried": "你试过的方法", "what_need_from_军哥": "需要军哥做什么"}}
+   格式: {{"issue": "简洁描述", "what_you_tried": "你试过的方法", "what_need_from_榛名雪": "需要榛名雪做什么"}}
 2. 结束当前轮次。触手脚本会检测到求助文件，进入等待状态。
 3. 你不需要在 prompt 里处理等待——脚本层会处理。"""
 
     resume_context = ""
     if resume_files:
-        resume_context = "\n## ⚡ 续跑上下文\n上次运行时你请求了帮助，军哥已经处理完毕。回复内容在以下文件中，请读取后继续未完成的工作：\n"
+        resume_context = "\n## ⚡ 续跑上下文\n上次运行时你请求了帮助，榛名雪已经处理完毕。回复内容在以下文件中，请读取后继续未完成的工作：\n"
         for f in resume_files:
             resume_context += f"- {f}\n"
         resume_context += "\n先读取所有回复文件，然后从断点继续执行。"
@@ -127,8 +127,8 @@ def get_unanswered_needs():
     return unanswered
 
 def wait_for_answers(need_files):
-    """轮询等待 answered_*.json 出现。无超时——等到军哥回复或小雪 kill。"""
-    log_progress(f"🆘 触手需要军哥帮助 — {len(need_files)} 个问题待处理")
+    """轮询等待 answered_*.json 出现。无超时——等到榛名雪回复或小雪 kill。"""
+    log_progress(f"🆘 触手需要榛名雪帮助 — {len(need_files)} 个问题待处理")
     for nf in need_files:
         try:
             with open(nf) as f:
@@ -137,7 +137,7 @@ def wait_for_answers(need_files):
         except Exception:
             log_progress(f"   📋 {nf.name}")
 
-    log_progress("⏳ 等待军哥回复中...（小雪会汇报，看门狗会检测心跳）")
+    log_progress("⏳ 等待榛名雪回复中...（小雪会汇报，看门狗会检测心跳）")
 
     answered = []
     last_log_time = time.time()
@@ -163,7 +163,7 @@ def wait_for_answers(need_files):
 
         if time.time() - last_log_time > 60:
             remaining = sum(1 for _ in HELP_DIR.glob("need_*.json"))
-            log_progress(f"⏳ 仍在等待军哥回复... ({remaining - len(answered)} 个未回复)")
+            log_progress(f"⏳ 仍在等待榛名雪回复... ({remaining - len(answered)} 个未回复)")
             last_log_time = time.time()
 
     log_progress(f"✅ 全部 {len(answered)} 个问题已回复，准备续跑")
@@ -347,7 +347,7 @@ def main():
         if not unanswered:
             break
 
-        # 有求助 — 原地等待军哥回复（无超时）
+        # 有求助 — 原地等待榛名雪回复（无超时）
         answered = wait_for_answers(unanswered)
         resume_files = [str(a) for a in answered]
         log_progress(f"🔄 收到 {len(answered)} 个回复，续跑...")

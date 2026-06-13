@@ -10,3 +10,6 @@ build/
 *.swp
 *.swo
 tentacle_findings/*.txt
+
+.env
+.venv/

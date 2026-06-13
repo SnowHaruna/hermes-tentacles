@@ -14,7 +14,7 @@
 
 ## 组件
 
-### tentacle.py（149 行）
+### tentacle.py（385 行）
 核心分身脚本。被主 Hermes 通过 `terminal(background=true)` 调用。
 - 继承主记忆（`skip_memory=False`）
 - 独立 AIAgent 推理循环
