@@ -154,7 +154,7 @@ git clone https://github.com/SnowHaruna/hermes-tentacles.git
 | 项目 | 关系 |
 |------|------|
 | [Hermes-MemVault](https://github.com/SnowHaruna/Hermes-MemVault) | 记忆系统，触手的 RAG 快照来源 |
-| [memvault](https://github.com/SnowHaruna/memvault) | 上游独立 pip 包（原作者 @GwynCat） |
+| [memvault](https://github.com/SnowHaruna/memvault) | 独立 pip 包（感谢 @GwynCat） |
 
 ---
 
