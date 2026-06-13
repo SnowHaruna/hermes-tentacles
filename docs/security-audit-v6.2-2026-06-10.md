@@ -10,7 +10,7 @@
 
 ## 执行摘要
 
-V6.1 审计发现的 **10 项漏洞**，V6.2 已修复 **9 项**（代码级），剩余 **1 项** 需军哥手动操作（GitHub PAT 轮换）。
+V6.1 审计发现的 **10 项漏洞**，V6.2 已修复 **9 项**（代码级），剩余 **1 项** 需榛名雪手动操作（GitHub PAT 轮换）。
 
 本轮增量审计发现 **4 项新问题**：🔵LOW×3 + ℹ️INFO×1。无新 CRITICAL/HIGH/MEDIUM。
 
@@ -198,7 +198,7 @@ except ImportError:
 
 | 优先级 | 项目 | 类型 | 工作量 | 负责人 |
 |--------|------|------|--------|--------|
-| **P0 立即** | C1 — GitHub PAT 轮换 | 手动操作 | 2分钟 | **军哥** |
+| **P0 立即** | C1 — GitHub PAT 轮换 | 手动操作 | 2分钟 | **榛名雪** |
 | P3 可选 | N1 — 工具日志脱敏 | 代码 | 5分钟 | 小雪 |
 | P3 可选 | N3 — dotenv 导入保护 | 代码 | 2分钟 | 小雪 |
 | P3 可选 | N2 — chmod 验证加固 | 代码 | 3分钟 | 小雪 |
@@ -216,10 +216,10 @@ except ImportError:
 - 🔵 LOW: 2→5（2项已修 + 3项新发现）
 - ℹ️ INFO: 0→1
 
-**唯一阻塞项**：C1 (GitHub PAT 轮换) — 需军哥登录 GitHub Settings → Developer settings → Personal access tokens → 撤销 `ghp_0A...6SK6` → 生成新 token → 配置 credential helper。
+**唯一阻塞项**：C1 (GitHub PAT 轮换) — 需榛名雪登录 GitHub Settings → Developer settings → Personal access tokens → 撤销 `ghp_0A...6SK6` → 生成新 token → 配置 credential helper。
 
 **推荐下一步**：
-1. 军哥轮换 GitHub PAT (P0)
+1. 榛名雪轮换 GitHub PAT (P0)
 2. 可选修复 N1/N2/N3 (P3, 累计<10分钟)
 3. 清理 `import glob` (N4, 1分钟)
 
